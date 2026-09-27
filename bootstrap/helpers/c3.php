@@ -14,6 +14,7 @@
  *   - ACME resolver:        c3wildcard (DNS-01 via Cloudflare) next to upstream's letsencrypt (HTTP-01)
  */
 
+use App\Models\Project;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Str;
 
@@ -34,6 +35,23 @@ const C3_CLOUDFLARE_TOKEN_FILE = 'c3_cloudflare_token';
 const C3_STATE_STAGED = 'staged';
 
 const C3_STATE_LIVE = 'live';
+
+/**
+ * Labels directly under the apex that are never client sites. When the apex is the brand
+ * domain itself (e.g. connect3.io) these keep www/app/api/mail and the panel out of the
+ * staging rules, and stop anyone from claiming them as a client slug.
+ */
+const C3_RESERVED_LABELS = [
+    'www', 'app', 'api', 'docs', 'panel', 'staging', 'admin', 'dashboard', 'status', 'blog', 'cdn',
+    'portal', 'dev', 'shop', 'help', 'support', 'login', 'auth', 'sso', 'assets', 'static', 'media',
+    'mail', 'smtp', 'imap', 'pop', 'pop3', 'mx', 'webmail', 'autodiscover', 'autoconfig', 'ftp',
+    'ns', 'ns1', 'ns2', 'ns3', 'ns4', 'localhost', 'connect3',
+];
+
+function c3_isReservedLabel(?string $label): bool
+{
+    return $label !== null && in_array(strtolower($label), C3_RESERVED_LABELS, true);
+}
 
 function c3_normalizeApex(?string $apex): ?string
 {
@@ -105,6 +123,9 @@ function c3_isValidSlug(?string $slug): bool
     if (str_contains($slug, '--')) {
         return false;
     }
+    if (c3_isReservedLabel($slug)) {
+        return false;
+    }
 
     return preg_match('/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', $slug) === 1;
 }
@@ -123,8 +144,12 @@ function c3_isStagingHost(?string $host, ?string $apex): bool
     }
     $host = strtolower(rtrim($host, '.'));
     $apex = strtolower($apex);
+    if ($host === $apex || ! str_ends_with($host, '.'.$apex)) {
+        return false;
+    }
+    $label = substr($host, 0, -strlen('.'.$apex));
 
-    return $host !== $apex && str_ends_with($host, '.'.$apex);
+    return $label !== '' && ! str_contains($label, '.');
 }
 
 /**
@@ -233,13 +258,16 @@ function c3_ruleTargetsStaging(string $rule, string $apex): bool
  * @param  Collection<int, string>|array<int, string>  $labels
  * @return Collection<int, string>
  */
-function c3_enforceStagingLabels(Collection|array $labels, ?string $apex, string $certResolver = C3_DEFAULT_RESOLVER): Collection
+function c3_enforceStagingLabels(Collection|array $labels, ?string $apex, string $certResolver = C3_DEFAULT_RESOLVER, ?array $knownSlugs = null, ?string $ownSlug = null): Collection
 {
     $labels = collect($labels)->values();
     $apex = c3_normalizeApex($apex);
     if ($apex === null) {
         return $labels;
     }
+    // When the apex is the brand domain, only hostnames that belong to a real client project are
+    // staging sites. Anything else under the apex (www, api, whatever exists in DNS) is untouched.
+    $known = $knownSlugs === null ? null : array_map('strtolower', $knownSlugs);
 
     // router name => slug (or null when the slug cannot be derived)
     $stagingRouters = [];
@@ -254,12 +282,22 @@ function c3_enforceStagingLabels(Collection|array $labels, ?string $apex, string
         if (! c3_ruleTargetsStaging($rule, $apex)) {
             continue;
         }
+        $hosts = c3_hostsFromRule($rule);
         $slug = null;
-        foreach (c3_hostsFromRule($rule) as $host) {
-            $slug = c3_slugFromStagingHost($host, $apex);
-            if ($slug !== null) {
+        foreach ($hosts as $host) {
+            $candidate = c3_slugFromStagingHost($host, $apex);
+            if ($candidate !== null && ($known === null || in_array($candidate, $known, true))) {
+                $slug = $candidate;
                 break;
             }
+        }
+        if ($known !== null && $slug === null) {
+            // Host-less (or regexp) rules fail closed only for applications that belong to a client
+            // project; for everything else they are simply not ours to police.
+            if ($hosts !== [] || $ownSlug === null) {
+                continue;
+            }
+            $slug = strtolower($ownSlug);
         }
         $stagingRouters[$router] = $slug;
     }
@@ -337,18 +375,8 @@ function c3_requiredChainFor(?string $slug): array
 function c3_globalDynamicConfig(string $apex, string $certResolver = C3_DEFAULT_RESOLVER, bool $wildcardCert = false): array
 {
     $apex = c3_normalizeApex($apex);
-    $regex = '^[a-z0-9-]+\.'.str_replace('.', '\.', $apex).'$';
-    $robotsRule = "HostRegexp(`{$regex}`) && Path(`/robots.txt`)";
 
-    $tls = ['certResolver' => $certResolver];
-    if ($wildcardCert) {
-        $tls['domains'] = [[
-            'main' => $apex,
-            'sans' => ["*.{$apex}"],
-        ]];
-    }
-
-    return [
+    $config = [
         'http' => [
             'middlewares' => [
                 'c3-noindex' => [
@@ -370,23 +398,6 @@ function c3_globalDynamicConfig(string $apex, string $certResolver = C3_DEFAULT_
                     ],
                 ],
             ],
-            'routers' => [
-                'c3-robots-https' => [
-                    'rule' => $robotsRule,
-                    'priority' => 100000,
-                    'entryPoints' => ['https'],
-                    'service' => 'c3-coolify',
-                    'middlewares' => ['c3-robots-path', 'c3-noindex'],
-                    'tls' => $tls,
-                ],
-                'c3-robots-http' => [
-                    'rule' => $robotsRule,
-                    'priority' => 100000,
-                    'entryPoints' => ['http'],
-                    'service' => 'c3-coolify',
-                    'middlewares' => ['c3-robots-path', 'c3-noindex'],
-                ],
-            ],
             'services' => [
                 'c3-coolify' => [
                     'loadBalancer' => [
@@ -398,6 +409,38 @@ function c3_globalDynamicConfig(string $apex, string $certResolver = C3_DEFAULT_
             ],
         ],
     ];
+
+    if ($wildcardCert) {
+        // A router that exists only so the DNS-01 resolver obtains the wildcard certificate once;
+        // every staging router on the same resolver then reuses it from the ACME store.
+        $config['http']['routers'] = [
+            'c3-wildcard-anchor' => [
+                'rule' => "Host(`c3-acme-anchor.{$apex}`)",
+                'entryPoints' => ['https'],
+                'service' => 'c3-coolify',
+                'middlewares' => ['c3-noindex'],
+                'tls' => [
+                    'certResolver' => $certResolver,
+                    'domains' => [[
+                        'main' => $apex,
+                        'sans' => ["*.{$apex}"],
+                    ]],
+                ],
+            ],
+        ];
+    }
+
+    return $config;
+}
+
+/**
+ * Traefik rule matching "<slug>.<apex>" and every "<prefix>--<slug>.<apex>" preview hostname.
+ */
+function c3_projectHostRule(string $slug, string $apex): string
+{
+    $regex = '^[a-z0-9-]+--'.preg_quote($slug, '/').'\.'.str_replace('.', '\.', $apex).'$';
+
+    return "(Host(`{$slug}.{$apex}`) || HostRegexp(`{$regex}`))";
 }
 
 /**
@@ -416,6 +459,8 @@ function c3_projectDynamicConfig(
     array $liveDomains,
     ?string $dockerServiceName,
     string $liveCertResolver = C3_DEFAULT_RESOLVER,
+    ?string $apex = null,
+    string $stagingCertResolver = C3_DEFAULT_RESOLVER,
 ): array {
     $config = [
         'http' => [
@@ -430,9 +475,30 @@ function c3_projectDynamicConfig(
         ],
     ];
 
+    $routers = [];
+    $apex = c3_normalizeApex($apex);
+    if ($apex !== null) {
+        // /robots.txt on this client's hostnames is answered by Coolify, never by the app.
+        $robotsRule = c3_projectHostRule($slug, $apex).' && Path(`/robots.txt`)';
+        $routers["c3-{$slug}-robots"] = [
+            'rule' => $robotsRule,
+            'priority' => 100000,
+            'entryPoints' => ['https'],
+            'service' => 'c3-coolify',
+            'middlewares' => ['c3-robots-path', 'c3-noindex'],
+            'tls' => ['certResolver' => $stagingCertResolver],
+        ];
+        $routers["c3-{$slug}-robots-http"] = [
+            'rule' => $robotsRule,
+            'priority' => 100000,
+            'entryPoints' => ['http'],
+            'service' => 'c3-coolify',
+            'middlewares' => ['c3-robots-path', 'c3-noindex'],
+        ];
+    }
+
     $liveDomains = collect($liveDomains)->map(fn ($d) => c3_normalizeHost($d))->filter()->unique()->values();
     if ($siteState === C3_STATE_LIVE && $dockerServiceName && $liveDomains->isNotEmpty()) {
-        $routers = [];
         foreach ($liveDomains as $i => $host) {
             $routers["c3-{$slug}-live-{$i}"] = [
                 'rule' => "Host(`{$host}`)",
@@ -447,10 +513,26 @@ function c3_projectDynamicConfig(
                 'middlewares' => ['c3-redirect-https'],
             ];
         }
+    }
+    if ($routers !== []) {
         $config['http']['routers'] = $routers;
     }
 
     return $config;
+}
+
+/**
+ * Every client slug on this instance, for the deploy-time guardrail.
+ *
+ * @return array<int, string>
+ */
+function c3_knownSlugs(): array
+{
+    try {
+        return Project::query()->whereNotNull('client_slug')->pluck('client_slug')->map(fn ($s) => strtolower($s))->values()->all();
+    } catch (Throwable) {
+        return [];
+    }
 }
 
 /**

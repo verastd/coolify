@@ -8,6 +8,7 @@ use App\Support\ValidationPatterns;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 
 class ProjectController extends Controller
@@ -248,7 +249,7 @@ class ProjectController extends Controller
         $validator = Validator::make($request->all(), [
             'name' => ValidationPatterns::nameRules(),
             'description' => ValidationPatterns::descriptionRules(),
-            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', 'unique:projects,client_slug'], // Connect3 fork
+            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', Rule::notIn(C3_RESERVED_LABELS), 'unique:projects,client_slug'], // Connect3 fork
         ], ValidationPatterns::combinedMessages());
 
         $extraFields = array_diff(array_keys($request->all()), $allowedFields);

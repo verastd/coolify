@@ -35,7 +35,7 @@ class C3Settings extends Component
     protected function rules(): array
     {
         return [
-            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', Rule::unique('projects', 'client_slug')->ignore($this->project->id)],
+            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', Rule::notIn(C3_RESERVED_LABELS), Rule::unique('projects', 'client_slug')->ignore($this->project->id)],
             'live_domains' => ['nullable', 'string', 'max:2000'],
             'ai_gateway_key_id' => ['nullable', 'string', 'max:255'],
         ];

@@ -167,6 +167,8 @@ trait HasConnect3Site
             siteState: $this->site_state,
             liveDomains: $this->liveDomainsList(),
             dockerServiceName: $this->primaryDockerServiceName(),
+            apex: c3_stagingApex(),
+            stagingCertResolver: c3_stagingCertResolver(),
         );
     }
 }

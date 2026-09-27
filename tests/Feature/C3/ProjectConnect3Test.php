@@ -159,7 +159,8 @@ describe('application staging hostnames', function () {
 
         $staged = $project->c3DynamicConfig();
         expect(data_get($staged, 'http.middlewares.c3-todd-plumbing-auth.basicAuth.users.0'))->toStartWith('todd-plumbing:$2y$')
-            ->and(data_get($staged, 'http.routers'))->toBeNull();
+            ->and(data_get($staged, 'http.routers.c3-todd-plumbing-robots.rule'))->toContain('Host(`todd-plumbing.'.C3_FEATURE_APEX.'`)')
+            ->and(data_get($staged, 'http.routers.c3-todd-plumbing-live-0'))->toBeNull();
 
         $project->update(['site_state' => 'live', 'live_domains' => ['example.com']]);
         $live = $project->fresh()->c3DynamicConfig();

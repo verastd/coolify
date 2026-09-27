@@ -11,6 +11,7 @@ use App\Models\Project;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Validator;
+use Illuminate\Validation\Rule;
 use OpenApi\Attributes as OA;
 
 /**
@@ -84,7 +85,7 @@ class C3Controller extends Controller
         $this->authorize('update', $project);
 
         $validator = Validator::make($request->all(), [
-            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', 'unique:projects,client_slug,'.$project->id],
+            'client_slug' => ['nullable', 'string', 'max:63', 'regex:/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/', 'not_regex:/--/', Rule::notIn(C3_RESERVED_LABELS), 'unique:projects,client_slug,'.$project->id],
             'ai_gateway_key_id' => ['nullable', 'string', 'max:255'],
         ]);
         $extraFields = array_diff(array_keys($request->all()), $allowedFields);

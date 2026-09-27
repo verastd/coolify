@@ -38,6 +38,9 @@ describe('slug and hostname rules', function () {
             ->and(c3_isValidSlug('pr-1--todd'))->toBeFalse()
             ->and(c3_isValidSlug('-todd'))->toBeFalse()
             ->and(c3_isValidSlug('Todd'))->toBeFalse()
+            ->and(c3_isValidSlug('www'))->toBeFalse()
+            ->and(c3_isValidSlug('mail'))->toBeFalse()
+            ->and(c3_isValidSlug('panel'))->toBeFalse()
             ->and(c3_isValidSlug(str_repeat('a', 64)))->toBeFalse();
     });
 
@@ -49,6 +52,17 @@ describe('slug and hostname rules', function () {
             ->and(c3_slugFromStagingHost('a.b.'.C3_TEST_APEX, C3_TEST_APEX))->toBeNull()
             ->and(c3_slugFromStagingHost(C3_TEST_APEX, C3_TEST_APEX))->toBeNull()
             ->and(c3_slugFromStagingHost('example.com', C3_TEST_APEX))->toBeNull();
+    });
+
+    test('reserved labels can never be a slug, so they never resolve to a client', function () {
+        expect(c3_isStagingHost('www.'.C3_TEST_APEX, C3_TEST_APEX))->toBeTrue()
+            ->and(c3_slugFromStagingHost('www.'.C3_TEST_APEX, C3_TEST_APEX))->toBeNull()
+            ->and(c3_slugFromStagingHost('mail.'.C3_TEST_APEX, C3_TEST_APEX))->toBeNull();
+    });
+
+    test('project host rule covers the bare host and every prefixed preview', function () {
+        expect(c3_projectHostRule('todd', C3_TEST_APEX))
+            ->toBe('(Host(`todd.'.C3_TEST_APEX.'`) || HostRegexp(`^[a-z0-9-]+--todd\.sites\.c3-staging\.test$`))');
     });
 
     test('apex normalisation strips scheme, path and dots', function () {
@@ -85,6 +99,30 @@ describe('staging label guardrail', function () {
         $labels = c3_enforceStagingLabels(c3TestLabels(['https://pr-7--todd.'.C3_TEST_APEX]), C3_TEST_APEX)->all();
 
         expect(c3MiddlewaresOf($labels, 'https-0-appuuid'))->toContain('c3-todd-auth@file');
+    });
+
+    test('with known slugs, only real client hostnames under the apex are protected (brand apex)', function () {
+        $known = ['todd', 'rogers-hvac'];
+
+        $brand = c3_enforceStagingLabels(c3TestLabels(['https://www.'.C3_TEST_APEX]), C3_TEST_APEX, 'letsencrypt', $known)->all();
+        $api = c3_enforceStagingLabels(c3TestLabels(['https://api.'.C3_TEST_APEX]), C3_TEST_APEX, 'letsencrypt', $known)->all();
+        $unknownClient = c3_enforceStagingLabels(c3TestLabels(['https://someone.'.C3_TEST_APEX]), C3_TEST_APEX, 'letsencrypt', $known)->all();
+        $client = c3_enforceStagingLabels(c3TestLabels(['https://pr-4--rogers-hvac.'.C3_TEST_APEX]), C3_TEST_APEX, 'letsencrypt', $known)->all();
+
+        expect($brand)->toEqualCanonicalizing(c3TestLabels(['https://www.'.C3_TEST_APEX]))
+            ->and($api)->toEqualCanonicalizing(c3TestLabels(['https://api.'.C3_TEST_APEX]))
+            ->and($unknownClient)->toEqualCanonicalizing(c3TestLabels(['https://someone.'.C3_TEST_APEX]))
+            ->and(c3MiddlewaresOf($client, 'https-0-appuuid'))->toBe(['c3-rogers-hvac-auth@file', 'c3-noindex@file', 'gzip']);
+    });
+
+    test('with known slugs, host-less routers fail closed only for client projects', function () {
+        $labels = ['traefik.http.routers.catchall.rule=PathPrefix(`/`)', 'traefik.http.routers.catchall.entryPoints=https'];
+
+        $client = c3_enforceStagingLabels($labels, C3_TEST_APEX, 'letsencrypt', ['todd'], 'todd')->all();
+        $other = c3_enforceStagingLabels($labels, C3_TEST_APEX, 'letsencrypt', ['todd'], null)->all();
+
+        expect(c3MiddlewaresOf($client, 'catchall'))->toBe(['c3-todd-auth@file', 'c3-noindex@file'])
+            ->and(c3MiddlewaresOf($other, 'catchall'))->toBeEmpty();
     });
 
     test('live domains are left untouched', function () {
@@ -151,25 +189,34 @@ describe('staging label guardrail', function () {
 });
 
 describe('dynamic proxy configuration', function () {
-    test('global config carries the noindex header, https redirect and robots override', function () {
-        $config = c3_globalDynamicConfig(C3_TEST_APEX, 'c3wildcard', true);
+    test('global config carries the shared middlewares and the Coolify service', function () {
+        $config = c3_globalDynamicConfig(C3_TEST_APEX);
 
         expect(data_get($config, 'http.middlewares.c3-noindex.headers.customResponseHeaders.X-Robots-Tag'))->toBe('noindex, nofollow, noarchive, nosnippet')
             ->and(data_get($config, 'http.middlewares.c3-redirect-https.redirectScheme.scheme'))->toBe('https')
             ->and(data_get($config, 'http.middlewares.c3-robots-path.replacePath.path'))->toBe('/c3/robots.txt')
-            ->and(data_get($config, 'http.routers.c3-robots-https.rule'))->toBe('HostRegexp(`^[a-z0-9-]+\.sites\.c3-staging\.test$`) && Path(`/robots.txt`)')
-            ->and(data_get($config, 'http.routers.c3-robots-https.priority'))->toBe(100000)
-            ->and(data_get($config, 'http.routers.c3-robots-https.tls.certResolver'))->toBe('c3wildcard')
-            ->and(data_get($config, 'http.routers.c3-robots-https.tls.domains.0.main'))->toBe(C3_TEST_APEX)
-            ->and(data_get($config, 'http.routers.c3-robots-https.tls.domains.0.sans.0'))->toBe('*.'.C3_TEST_APEX)
-            ->and(data_get($config, 'http.routers.c3-robots-http.entryPoints'))->toBe(['http'])
-            ->and(data_get($config, 'http.services.c3-coolify.loadBalancer.servers.0.url'))->toBe('http://coolify:8080');
+            ->and(data_get($config, 'http.services.c3-coolify.loadBalancer.servers.0.url'))->toBe('http://coolify:8080')
+            ->and(data_get($config, 'http.routers'))->toBeNull();
     });
 
-    test('global config without a token has no wildcard domains', function () {
-        $config = c3_globalDynamicConfig(C3_TEST_APEX);
+    test('global config with a wildcard token adds the ACME anchor router', function () {
+        $config = c3_globalDynamicConfig(C3_TEST_APEX, 'c3wildcard', true);
 
-        expect(data_get($config, 'http.routers.c3-robots-https.tls'))->toBe(['certResolver' => 'letsencrypt']);
+        expect(data_get($config, 'http.routers.c3-wildcard-anchor.tls.certResolver'))->toBe('c3wildcard')
+            ->and(data_get($config, 'http.routers.c3-wildcard-anchor.tls.domains.0.main'))->toBe(C3_TEST_APEX)
+            ->and(data_get($config, 'http.routers.c3-wildcard-anchor.tls.domains.0.sans.0'))->toBe('*.'.C3_TEST_APEX);
+    });
+
+    test('project config answers robots.txt for its own hostnames only', function () {
+        $config = c3_projectDynamicConfig('todd', 'todd', 'hash', 'staged', [], null, 'letsencrypt', C3_TEST_APEX, 'c3wildcard');
+
+        expect(data_get($config, 'http.routers.c3-todd-robots.rule'))->toBe('(Host(`todd.'.C3_TEST_APEX.'`) || HostRegexp(`^[a-z0-9-]+--todd\.sites\.c3-staging\.test$`)) && Path(`/robots.txt`)')
+            ->and(data_get($config, 'http.routers.c3-todd-robots.priority'))->toBe(100000)
+            ->and(data_get($config, 'http.routers.c3-todd-robots.service'))->toBe('c3-coolify')
+            ->and(data_get($config, 'http.routers.c3-todd-robots.middlewares'))->toBe(['c3-robots-path', 'c3-noindex'])
+            ->and(data_get($config, 'http.routers.c3-todd-robots.tls.certResolver'))->toBe('c3wildcard')
+            ->and(data_get($config, 'http.routers.c3-todd-robots-http.entryPoints'))->toBe(['http'])
+            ->and(data_get($config, 'http.routers.c3-todd-live-0'))->toBeNull();
     });
 
     test('staged project config has only the basic auth middleware', function () {
