@@ -31,7 +31,7 @@ class RootUserSeeder extends Seeder
                 'password' => env('ROOT_USER_PASSWORD'),
             ], [
                 'email' => ['required', 'email:rfc,dns', 'max:255'],
-                'username' => ['required', 'string', 'min:3', 'max:255', 'regex:/^[\w\s-]+$/'],
+                'username' => ['required', 'string', 'min:1', 'max:255', 'regex:/^[\w\s-]+$/'], // Connect3 fork: two-letter names are names
                 'password' => ['required', 'string', 'min:8', Password::min(8)->mixedCase()->letters()->numbers()->symbols()->uncompromised()],
             ]);
 
